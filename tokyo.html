@@ -874,9 +874,11 @@ window.addEventListener("load",function(){
   setTimeout(function(){ if(!window.__mapsOK) activateMapFallback("timeout"); },4500);
 });
 
-/* 只用 Maps JavaScript API 本身：編號標記 ＋ 造訪順序虛線。
-   不呼叫 DirectionsService —— 它吃的是 Directions API (Legacy)，
-   2025/03/01 起不再開放給新專案，一律回 REQUEST_DENIED。 */
+/* 每日地圖分兩層：
+   1) 編號標記＋造訪順序虛線 —— 只用 Maps JavaScript API 本身，一定畫得出來。
+   2) 再用 Routes Library（Route.computeRoutes，走 Routes API）算真實行車路線；
+      成功就換成沿道路的路線＋各段即時車程，失敗就保留虛線並顯示原因。
+   不使用 DirectionsService：它吃 Directions API (Legacy)，2025/03/01 起不開放新專案。 */
 function buildDayMap(day){
   const el=document.getElementById("map-day"+day.n);
   const legEl=document.getElementById("leg-day"+day.n);
@@ -888,13 +890,12 @@ function buildDayMap(day){
   });
   const bounds=new google.maps.LatLngBounds();
   const infow=new google.maps.InfoWindow();
-  const path=[];
-  day.mapSeq.forEach(s=>{
-    const p=P[s.id];
-    if(typeof p.lat!=="number"||typeof p.lng!=="number") return;
-    const pos={lat:p.lat,lng:p.lng};
-    path.push(pos); bounds.extend(pos);
-    const m=new google.maps.Marker({position:pos,map,title:s.num+"　"+p.zh,
+  const seq=day.mapSeq.filter(s=>typeof P[s.id].lat==="number"&&typeof P[s.id].lng==="number");
+  const path=seq.map(s=>({lat:P[s.id].lat,lng:P[s.id].lng}));
+  seq.forEach((s,i)=>{
+    const p=P[s.id], pos=path[i];
+    bounds.extend(pos);
+    const m=new google.maps.Marker({position:pos,map,title:s.num+"　"+p.zh,zIndex:10,
       label:{text:String(s.num),color:"#fff",fontWeight:"700",fontSize:"12px"},
       icon:{path:google.maps.SymbolPath.CIRCLE,scale:13,
         fillColor:s.num==="0"?"#e53e3e":"#2b6cb0",fillOpacity:1,strokeColor:"#fff",strokeWeight:2}});
@@ -906,13 +907,78 @@ function buildDayMap(day){
       infow.open(map,m);
     });
   });
-  if(path.length>1) new google.maps.Polyline({map,path,geodesic:true,strokeOpacity:0,
-    icons:[{icon:{path:"M 0,-1 0,1",strokeOpacity:.75,strokeColor:"#2b6cb0",scale:3},offset:"0",repeat:"12px"}]});
+  const dashed=path.length>1?new google.maps.Polyline({map,path,geodesic:true,strokeOpacity:0,
+    icons:[{icon:{path:"M 0,-1 0,1",strokeOpacity:.75,strokeColor:"#2b6cb0",scale:3},offset:"0",repeat:"12px"}]}):null;
   if(!bounds.isEmpty()) map.fitBounds(bounds);
   window.__mapsOK=true;
-  if(legEl) legEl.innerHTML='<b>🗺️ 本日造訪順序</b>（<span style="color:#ef8a8a">0</span>＝住宿，1·2·3… 依序；點標記看地址與連結）。'+
-    '<br>虛線是<b>順序示意的直線，不是實際行車路線</b>；標記為概略座標，精確位置請點站名或標記裡的連結。'+
-    '<br><b>各段車程／距離</b>見上方各站的「↳ 與上一站」標註；要實際導航請按下方「用 Google Maps 開啟整日路線」。';
+  if(legEl) legEl.innerHTML='<b>🛣️ 正在向 Google 計算實際行車路線…</b>';
+  drawRealRoute(map,seq,path,dashed,legEl);
+}
+
+async function drawRealRoute(map,seq,path,dashed,legEl){
+  if(path.length<2) return;
+  try{
+    if(typeof google.maps.importLibrary!=="function") throw new Error("NO_IMPORT_LIBRARY");
+    const lib=await google.maps.importLibrary("routes");
+    const Route=lib&&lib.Route;
+    if(!Route||typeof Route.computeRoutes!=="function") throw new Error("NO_ROUTE_CLASS");
+    const res=await Route.computeRoutes({
+      origin:path[0],
+      destination:path[path.length-1],
+      intermediates:path.slice(1,-1).map(ll=>({location:ll})),
+      travelMode:"DRIVING",
+      fields:["path","legs"]
+    });
+    const route=res&&res.routes&&res.routes[0];
+    if(!route) throw new Error("ZERO_RESULTS");
+    route.createPolylines().forEach(pl=>pl.setMap(map));
+    if(dashed) dashed.setMap(null);
+    if(legEl) legEl.innerHTML=routeLegsHtml(route.legs||[],seq);
+  }catch(e){
+    if(legEl) legEl.innerHTML=routeErrorHtml(e);
+  }
+}
+
+function fmtDur(ms){
+  if(typeof ms!=="number") return "—";
+  const m=Math.round(ms/60000), h=Math.floor(m/60);
+  return (h?h+" 小時 ":"")+(m%60)+" 分";
+}
+function fmtDist(meters){ return typeof meters==="number"?(meters/1000).toFixed(1)+" km":"—"; }
+
+function routeLegsHtml(legs,seq){
+  let totMs=0,totM=0;
+  let html='<b>🛣️ 各段行車（Google Routes 即時計算，自駕）</b>';
+  legs.forEach((lg,i)=>{
+    if(!seq[i+1]) return;
+    const ms=lg.durationMillis, m=lg.distanceMeters;
+    if(typeof ms==="number") totMs+=ms;
+    if(typeof m==="number") totM+=m;
+    const over=typeof ms==="number"&&ms>120*60000;
+    html+='<div class="legline"><b>'+seq[i].num+'→'+seq[i+1].num+'</b> '+P[seq[i].id].zh+' → '+P[seq[i+1].id].zh+
+      '：<span'+(over?' style="color:#ef8a8a;font-weight:700"':'')+'>行車 '+fmtDur(ms)+'</span>（'+fmtDist(m)+'）'+
+      (over?' ⚠️ 超過 2 小時':'')+'</div>';
+  });
+  html+='<div class="legline"><b>當日行車合計（不含停留）約 '+fmtDur(totMs)+'／'+fmtDist(totM)+'</b>'+
+    '　<span class="small">以目前路況估算，實際依出發時段而定；步行段（如晚餐、參道）不在此列。</span></div>';
+  return html;
+}
+
+function escHtml(t){ return String(t).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function routeErrorHtml(e){
+  const msg=(e&&e.message)||String(e);
+  let why;
+  if(/NO_IMPORT_LIBRARY|NO_ROUTE_CLASS/.test(msg))
+    why='目前載入的 Maps JavaScript API 版本沒有提供 Routes Library 的 <code>Route</code> 類別。';
+  else if(/PERMISSION|DENIED|not been used|disabled|API_KEY|403/i.test(msg))
+    why='Routes API 拒絕了這個金鑰。請確認 <b>Routes API</b> 已啟用、且有勾在金鑰的「API 限制」清單內，帳單帳戶有效。';
+  else if(/ZERO_RESULTS|NOT_FOUND|INVALID/i.test(msg))
+    why='Routes 找不到可行駛的路線（某站點座標可能落在無法通行的位置）。';
+  else
+    why='Routes 回傳了未預期的錯誤。';
+  return '<b>⚠️ 實際行車路線沒有畫出來，目前顯示的是順序示意虛線。</b>'+why+
+    '<br><span class="small">錯誤訊息：<code>'+escHtml(msg).slice(0,300)+'</code></span>'+
+    '<br><span class="small">標記與站點連結不受影響；各段車程見上方各站「↳ 與上一站」標註，導航請按「用 Google Maps 開啟整日路線」。</span>';
 }
 
 </script>
