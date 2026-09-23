@@ -834,9 +834,31 @@ function initMaps(){
 }
 window.initMaps=initMaps;
 
-function activateMapFallback(){
+/* 失敗原因分流：三種原因的解法完全不同，訊息要能區分 */
+function mapErrorHtml(reason,status){
+  const tail='<br><span class="small">改完最多 <b>5 分鐘</b>才生效，之後請<b>強制重新整理</b>（Cmd／Ctrl + Shift + R）。'+
+    '在此之前，上方站點與「開啟整日路線」按鈕均可正常使用；各段估算車程／距離見上方各站「↳ 與上一站」標註。</span>';
+  if(reason==="directions")
+    return '<b>⚠️ 地圖本身載入成功，但「路線規劃」失敗。</b>Directions 回傳狀態：<code>'+(status||"UNKNOWN")+'</code>。'+
+      '<br>・<code>REQUEST_DENIED</code>／<code>OVER_QUERY_LIMIT</code>：<b>Directions API 未啟用</b>，或未列在金鑰的「API 限制」清單內，或<b>配額／帳單</b>有問題。'+
+      '<br>・<code>ZERO_RESULTS</code>／<code>NOT_FOUND</code>：某個站點的搜尋字串定位不到（多半是地址寫法問題，與金鑰無關）。'+
+      '<br>・這個狀態<b>與 referrer 限制無關</b> —— referrer 擋掉的話會是下面那種「金鑰驗證失敗」。'+tail;
+  if(reason==="timeout")
+    return '<b>⚠️ Maps JavaScript API 在 4.5 秒內沒有載入完成。</b>'+
+      '<br>常見原因：網路或擴充套件擋掉了 <code>maps.googleapis.com</code>、指令碼載入失敗、或金鑰參數有誤。'+
+      '<br>請開瀏覽器主控台（F12 → Console）看實際錯誤訊息。'+tail;
+  /* reason === "auth" */
+  return '<b>⚠️ 金鑰驗證失敗（<code>gm_authFailure</code>）。</b>頁面上通常會同時跳出 Google 的「這個網頁無法正確載入 Google 地圖」灰色地圖。'+
+    '依可能性排序：'+
+    '<br>① <b>帳單／試用期</b> —— Google Maps Platform <b>需要有效的帳單帳戶</b>。免費試用期結束、或專案仍是 Demo Project 時，即使所有 API 都已啟用也會變成灰色地圖。'+
+    '<br>② <b>HTTP 參照網址（referrer）限制</b>未涵蓋本頁網址。注意結尾的 <code>/*</code> 不能省：要寫 <code>https://your.site/*</code>，只寫 <code>https://your.site/子目錄</code> 不會匹配更深的路徑。'+
+    '<br>③ <b>API 限制</b>未勾選 <b>Maps JavaScript API</b>。'+tail;
+}
+
+function activateMapFallback(reason,status){
   if(window.__mapsOK||window.__mapsFallback) return;
   window.__mapsFallback=true;
+  const msg=mapErrorHtml(reason||"auth",status);
   DAYS.forEach(day=>{
     const el=document.getElementById("map-day"+day.n);
     if(el){
@@ -849,14 +871,12 @@ function activateMapFallback(){
         '<a class="btnlink" target="_blank" rel="noopener" href="'+dayDirUrl(day)+'">🧭 用 Google Maps 開啟整日完整路線（自駕導航）</a>';
     }
     const legEl=document.getElementById("leg-day"+day.n);
-    if(legEl) legEl.innerHTML='<b>ℹ️ 內嵌互動地圖未顯示。</b>此金鑰設有「HTTP 參照網址（referrer）」來源限制，於未授權網址會出現 <code>RefererNotAllowedMapError</code>。'+
-      '<b>解法：</b>在 Google Cloud Console → 憑證 → 此金鑰 → 把開啟本頁的網址加入允許清單，並啟用 Maps JavaScript API 與 Directions API。'+
-      '在此之前，上方站點與「開啟整日路線」按鈕均可正常使用；各段估算車程／距離見上方各站「↳ 與上一站」標註。';
+    if(legEl) legEl.innerHTML=msg;
   });
 }
-window.gm_authFailure=function(){activateMapFallback();};
+window.gm_authFailure=function(){activateMapFallback("auth");};
 window.addEventListener("load",function(){
-  setTimeout(function(){ if(!window.__mapsOK) activateMapFallback(); },4500);
+  setTimeout(function(){ if(!window.__mapsOK) activateMapFallback("timeout"); },4500);
 });
 
 function buildDayMap(day){
@@ -883,7 +903,7 @@ function buildDayMap(day){
       drawMarkers(map,res,seq);
       showLegs(legEl,res,seq);
     }else{
-      activateMapFallback();
+      activateMapFallback("directions",status);
     }
   });
 }
