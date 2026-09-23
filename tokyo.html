@@ -835,14 +835,9 @@ function initMaps(){
 window.initMaps=initMaps;
 
 /* 失敗原因分流：三種原因的解法完全不同，訊息要能區分 */
-function mapErrorHtml(reason,status){
+function mapErrorHtml(reason){
   const tail='<br><span class="small">改完最多 <b>5 分鐘</b>才生效，之後請<b>強制重新整理</b>（Cmd／Ctrl + Shift + R）。'+
     '在此之前，上方站點與「開啟整日路線」按鈕均可正常使用；各段估算車程／距離見上方各站「↳ 與上一站」標註。</span>';
-  if(reason==="directions")
-    return '<b>⚠️ 地圖本身載入成功，但「路線規劃」失敗。</b>Directions 回傳狀態：<code>'+(status||"UNKNOWN")+'</code>。'+
-      '<br>・<code>REQUEST_DENIED</code>／<code>OVER_QUERY_LIMIT</code>：<b>Directions API 未啟用</b>，或未列在金鑰的「API 限制」清單內，或<b>配額／帳單</b>有問題。'+
-      '<br>・<code>ZERO_RESULTS</code>／<code>NOT_FOUND</code>：某個站點的搜尋字串定位不到（多半是地址寫法問題，與金鑰無關）。'+
-      '<br>・這個狀態<b>與 referrer 限制無關</b> —— referrer 擋掉的話會是下面那種「金鑰驗證失敗」。'+tail;
   if(reason==="timeout")
     return '<b>⚠️ Maps JavaScript API 在 4.5 秒內沒有載入完成。</b>'+
       '<br>常見原因：網路或擴充套件擋掉了 <code>maps.googleapis.com</code>、指令碼載入失敗、或金鑰參數有誤。'+
@@ -855,10 +850,10 @@ function mapErrorHtml(reason,status){
     '<br>③ <b>API 限制</b>未勾選 <b>Maps JavaScript API</b>。'+tail;
 }
 
-function activateMapFallback(reason,status){
+function activateMapFallback(reason){
   if(window.__mapsOK||window.__mapsFallback) return;
   window.__mapsFallback=true;
-  const msg=mapErrorHtml(reason||"auth",status);
+  const msg=mapErrorHtml(reason||"auth");
   DAYS.forEach(day=>{
     const el=document.getElementById("map-day"+day.n);
     if(el){
@@ -879,6 +874,9 @@ window.addEventListener("load",function(){
   setTimeout(function(){ if(!window.__mapsOK) activateMapFallback("timeout"); },4500);
 });
 
+/* 只用 Maps JavaScript API 本身：編號標記 ＋ 造訪順序虛線。
+   不呼叫 DirectionsService —— 它吃的是 Directions API (Legacy)，
+   2025/03/01 起不再開放給新專案，一律回 REQUEST_DENIED。 */
 function buildDayMap(day){
   const el=document.getElementById("map-day"+day.n);
   const legEl=document.getElementById("leg-day"+day.n);
@@ -888,71 +886,38 @@ function buildDayMap(day){
     mapTypeControl:false,streetViewControl:false,fullscreenControl:true,
     gestureHandling:"cooperative"
   });
-  const ds=new google.maps.DirectionsService();
-  const dr=new google.maps.DirectionsRenderer({map,suppressMarkers:true,
-    polylineOptions:{strokeColor:"#2b6cb0",strokeWeight:5,strokeOpacity:.8}});
-  const seq=day.mapSeq;
-  const pts=seq.map(s=>P[s.id].q);
-  const origin=pts[0], destination=pts[pts.length-1];
-  const waypoints=pts.slice(1,-1).map(q=>({location:q,stopover:true}));
-  ds.route({origin,destination,waypoints,optimizeWaypoints:false,
-    travelMode:google.maps.TravelMode.DRIVING},(res,status)=>{
-    if(status==="OK"){
-      window.__mapsOK=true;
-      dr.setDirections(res);
-      drawMarkers(map,res,seq);
-      showLegs(legEl,res,seq);
-    }else{
-      activateMapFallback("directions",status);
-    }
-  });
-}
-
-function drawMarkers(map,res,seq){
-  const legs=res.routes[0].legs;
   const bounds=new google.maps.LatLngBounds();
   const infow=new google.maps.InfoWindow();
-  const seen={};
-  function addMarker(pos,num,name){
-    if(seen[num]) return;
-    seen[num]=true;
-    const m=new google.maps.Marker({position:pos,map,title:num+"　"+name,
-      label:{text:String(num),color:"#fff",fontWeight:"700",fontSize:"12px"},
+  const path=[];
+  day.mapSeq.forEach(s=>{
+    const p=P[s.id];
+    if(typeof p.lat!=="number"||typeof p.lng!=="number") return;
+    const pos={lat:p.lat,lng:p.lng};
+    path.push(pos); bounds.extend(pos);
+    const m=new google.maps.Marker({position:pos,map,title:s.num+"　"+p.zh,
+      label:{text:String(s.num),color:"#fff",fontWeight:"700",fontSize:"12px"},
       icon:{path:google.maps.SymbolPath.CIRCLE,scale:13,
-        fillColor:num==="0"?"#e53e3e":"#2b6cb0",fillOpacity:1,strokeColor:"#fff",strokeWeight:2}});
-    m.addListener("click",()=>{infow.setContent('<div style="font-weight:700;color:#222">'+num+"　"+name+'</div>');infow.open(map,m);});
-    bounds.extend(pos);
-  }
-  for(let i=0;i<legs.length;i++){
-    addMarker(legs[i].start_location,seq[i].num,P[seq[i].id].zh);
-  }
-  addMarker(legs[legs.length-1].end_location,seq[seq.length-1].num,P[seq[seq.length-1].id].zh);
-  map.fitBounds(bounds);
+        fillColor:s.num==="0"?"#e53e3e":"#2b6cb0",fillOpacity:1,strokeColor:"#fff",strokeWeight:2}});
+    m.addListener("click",()=>{
+      infow.setContent('<div style="color:#222;font-size:13px;max-width:240px">'+
+        '<div style="font-weight:700">'+s.num+'　'+p.zh+'</div>'+
+        (p.addr?'<div style="color:#555;margin-top:2px">'+p.addr+'</div>':'')+
+        '<a style="display:inline-block;margin-top:4px" target="_blank" rel="noopener" href="'+gmapsSearch(p.q)+'">在 Google Maps 開啟 ↗</a></div>');
+      infow.open(map,m);
+    });
+  });
+  if(path.length>1) new google.maps.Polyline({map,path,geodesic:true,strokeOpacity:0,
+    icons:[{icon:{path:"M 0,-1 0,1",strokeOpacity:.75,strokeColor:"#2b6cb0",scale:3},offset:"0",repeat:"12px"}]});
+  if(!bounds.isEmpty()) map.fitBounds(bounds);
+  window.__mapsOK=true;
+  if(legEl) legEl.innerHTML='<b>🗺️ 本日造訪順序</b>（<span style="color:#ef8a8a">0</span>＝住宿，1·2·3… 依序；點標記看地址與連結）。'+
+    '<br>虛線是<b>順序示意的直線，不是實際行車路線</b>；標記為概略座標，精確位置請點站名或標記裡的連結。'+
+    '<br><b>各段車程／距離</b>見上方各站的「↳ 與上一站」標註；要實際導航請按下方「用 Google Maps 開啟整日路線」。';
 }
 
-function showLegs(legEl,res,seq){
-  const legs=res.routes[0].legs;
-  let total=0,html='<b>各段交通（Google 即時 · 自駕）＋ Geometry 直線距離</b>';
-  for(let i=0;i<legs.length;i++){
-    const lg=legs[i];
-    let straight="";
-    if(google.maps.geometry&&google.maps.geometry.spherical){
-      const d=google.maps.geometry.spherical.computeDistanceBetween(lg.start_location,lg.end_location);
-      straight="　｜直線 "+(d/1000).toFixed(1)+" km";
-    }
-    total+=lg.duration.value;
-    const over=lg.duration.value>120*60?' style="color:#ef8a8a;font-weight:700"':'';
-    html+='<div class="legline"><b>'+seq[i].num+"→"+seq[i+1].num+'</b> '+P[seq[i].id].zh+" → "+P[seq[i+1].id].zh+
-          '：<span'+over+'>行車 '+lg.duration.text+'</span>（'+lg.distance.text+'）'+straight+
-          (lg.duration.value>120*60?' ⚠️>120分':'')+'</div>';
-  }
-  const h=Math.floor(total/3600), mn=Math.round((total%3600)/60);
-  html+='<div class="legline"><b>當日行車合計（不含停留）約 '+(h?h+" 小時 ":"")+mn+' 分</b></div>';
-  legEl.innerHTML=html;
-}
 </script>
-<!-- Google Maps JavaScript API（沿用 index.html 的金鑰；geometry 用於距離計算） -->
+<!-- Google Maps JavaScript API（沿用 index.html 的金鑰） -->
 <script async defer
-  src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBKuVAYBTIEkUxY1QhTq5RRogYUT1vPIlg&libraries=geometry&callback=initMaps&v=weekly"></script>
+  src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBKuVAYBTIEkUxY1QhTq5RRogYUT1vPIlg&callback=initMaps&v=weekly"></script>
 </body>
 </html>
